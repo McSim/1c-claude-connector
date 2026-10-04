@@ -1,0 +1,135 @@
+{
+  "manifest_version": "0.3",
+  "name": "1c-odata-connector",
+  "display_name": "1С-коннектор",
+  "version": "1.3.1",
+  "description": "Подключает Claude к вашей 1С через OData, напрямую или через ваш сервер. Только чтение.",
+  "long_description": "Claude получает доступ к данным вашей 1С через стандартный интерфейс OData: справочники, документы, остатки и обороты регистров. Если 1С закрыта белым списком IP, укажите сервер, IP которого добавлен в белый список: коннектор подключится к 1С через него по SSH, на сервер ничего устанавливать не нужно. Коннектор выполняет только чтение. Все пароли хранятся в защищённом хранилище системы и не попадают в чат.",
+  "author": {
+    "name": "drobitko.pro",
+    "url": "https://drobitko.pro"
+  },
+  "homepage": "https://drobitko.pro",
+  "server": {
+    "type": "node",
+    "entry_point": "server/index.js",
+    "mcp_config": {
+      "command": "node",
+      "args": [
+        "${__dirname}/server/index.js"
+      ],
+      "env": {
+        "ODATA_URL": "${user_config.odata_url}",
+        "ODATA_USERNAME": "${user_config.username}",
+        "ODATA_PASSWORD": "${user_config.password}",
+        "SSH_HOST": "${user_config.ssh_host}",
+        "SSH_USER": "${user_config.ssh_user}",
+        "SSH_PASSWORD": "${user_config.ssh_password}",
+        "SSH_KEY_PATH": "${user_config.ssh_key}",
+        "DB_DESCRIPTION": "${user_config.db_description}",
+        "ALLOW_SELF_SIGNED": "${user_config.allow_self_signed}"
+      }
+    }
+  },
+  "tools": [
+    {
+      "name": "check_connection",
+      "description": "Пошаговая проверка связи с 1С"
+    },
+    {
+      "name": "list_objects",
+      "description": "Список опубликованных объектов 1С"
+    },
+    {
+      "name": "describe_object",
+      "description": "Поля объекта 1С"
+    },
+    {
+      "name": "query",
+      "description": "Выборка данных из 1С (только чтение)"
+    },
+    {
+      "name": "count",
+      "description": "Количество записей"
+    }
+  ],
+  "user_config": {
+    "odata_url": {
+      "type": "string",
+      "title": "Адрес OData",
+      "description": "Адрес от тех. специалиста, например http://server/base/odata/standard.odata/ (можно без окончания)",
+      "required": true
+    },
+    "username": {
+      "type": "string",
+      "title": "Логин",
+      "description": "Пользователь 1С с правами только на чтение",
+      "required": true
+    },
+    "password": {
+      "type": "string",
+      "title": "Пароль",
+      "description": "Хранится в защищённом хранилище системы",
+      "sensitive": true,
+      "required": false
+    },
+    "db_description": {
+      "type": "string",
+      "title": "Описание базы (необязательно)",
+      "description": "Подсказка для Claude, например: «УТ 11, оптовая торговля стройматериалами, склады Москва и Калининград»",
+      "required": false,
+      "default": ""
+    },
+    "ssh_host": {
+      "type": "string",
+      "title": "Сервер-посредник (необязательно)",
+      "description": "Нужен, если 1С пускает только адреса из белого списка. Впишите IP сервера из белого списка, например 203.0.113.10 (порт SSH, если не 22: 203.0.113.10:2222). Если 1С открыта для вашего компьютера, оставьте пустым.",
+      "required": false,
+      "default": ""
+    },
+    "ssh_user": {
+      "type": "string",
+      "title": "Логин сервера (SSH)",
+      "description": "Пользователь для входа на сервер-посредник",
+      "required": false,
+      "default": ""
+    },
+    "ssh_password": {
+      "type": "string",
+      "title": "Пароль сервера (SSH)",
+      "description": "Пароль от сервера или от SSH-ключа. Хранится в защищённом хранилище системы",
+      "sensitive": true,
+      "required": false,
+      "default": ""
+    },
+    "ssh_key": {
+      "type": "file",
+      "title": "SSH-ключ (необязательно)",
+      "description": "Файл приватного ключа, если вход на сервер по ключу, а не по паролю",
+      "required": false
+    },
+    "allow_self_signed": {
+      "type": "boolean",
+      "title": "Разрешить самоподписанный сертификат https",
+      "description": "Включайте, только если 1С работает по https с самоподписанным сертификатом и коннектор сообщил об этом",
+      "required": false,
+      "default": false
+    }
+  },
+  "compatibility": {
+    "platforms": [
+      "darwin",
+      "win32"
+    ],
+    "runtimes": {
+      "node": ">=18.0.0"
+    }
+  },
+  "keywords": [
+    "1С",
+    "1C",
+    "OData",
+    "бухгалтерия"
+  ],
+  "license": "MIT"
+}

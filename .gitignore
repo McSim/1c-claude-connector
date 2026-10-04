@@ -1,0 +1,8 @@
+node_modules/
+dist/
+*.log
+tests/hostkey*
+tests/k1
+tests/k2
+HANDOFF.md
+.claude/

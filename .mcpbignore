@@ -1,0 +1,8 @@
+/tests/
+/dist/
+/HANDOFF.md
+/README.md
+/.gitignore
+/*.log
+/*.mcpb
+/package-lock.json

@@ -73,6 +73,13 @@ await withClient({}, async c => {
   r = await call(c,"query",{object:"Document_РеализацияТоваровУслуг",select:"Number,Основание/Контрагент/Description",top:2}); check("expand: вложенный путь", r.text.includes('"_expand": "Основание/Контрагент"'), r.text);
   const init = c.getInstructions?.() || ""; check("инструкции: названия вместо GUID", init.includes("Контрагент/Description"), init.slice(0,100));
 });
+await withClient({}, async c => {
+  const r = await call(c,"check_connection"); check("check_connection: примеры вопросов и совет про описание базы", r.text.includes("Можно спрашивать обычными словами") && r.text.includes("Покажи 5 последних реализаций") && r.text.includes("описать базу одной фразой"), r.text);
+});
+await withClient({DB_DESCRIPTION:"УТ 11"}, async c => {
+  const r = await call(c,"check_connection"); check("check_connection: без совета, если база описана", r.text.includes("Можно спрашивать") && !r.text.includes("Совет:"), r.text);
+  const init = c.getInstructions?.() || ""; check("инструкции: как отвечать и запрет записи", init.includes("Как отвечать") && init.includes("Коннектор только читает") && init.includes("Никогда не проси пароли"), init.slice(0,80));
+});
 await withClient(SSHOK, async c => { const r = await call(c,"check_connection"); check("SSH: всё верно", r.text.includes("SSH установлено") && r.text.includes("приняты"), r.text);
   const q = await call(c,"count",{object:"Document_РеализацияТоваровУслуг"}); check("SSH: запрос данных через туннель", q.text.includes("1234"), q.text); });
 for (const [label, host] of [["https://", "https://127.0.0.1:2224"],["ssh://user@", "ssh://deploy@127.0.0.1:2224/"],["команда ssh -p", "ssh deploy@127.0.0.1 -p 2224"],["пробелы", " 127.0.0.1:2224 "]])

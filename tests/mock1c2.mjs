@@ -36,6 +36,11 @@ http.createServer((req,res)=>{
   if (p==="metahits") return send(res,200,String(metaHits),"text/plain");
   if (f.includes("BAD")) return send(res,400,JSON.stringify({"odata.error":{code:"-1",message:{lang:"ru",value:"Неправильное выражение фильтра: поле НетТакого не найдено"}}}));
   if (p==="Catalog_Ошибка500") return send(res,500,JSON.stringify({"odata.error":{code:"14",message:{value:"Нет свободной лицензии на сервере 1С"}}}));
+  if (p==="Catalog_Много") {
+    const top=+u.searchParams.get("$top")||100, skip=+u.searchParams.get("$skip")||0;
+    const all = Array.from({length:2300},(_, i)=>({Ref_Key:`k${i}`,Description:`Товар ${i}`}));
+    return send(res,200,JSON.stringify({value:all.slice(skip,skip+top)}));
+  }
   if (p==="Document_РеализацияТоваровУслуг/$count") return send(res,200,"﻿1234","text/plain");
   if (p==="Document_РеализацияТоваровУслуг") {
     const top=+u.searchParams.get("$top")||500; return send(res,200,"﻿"+JSON.stringify({"odata.metadata":"x",value:big.slice(0,top).map((r,i)=>i===0&&u.searchParams.get("$expand")?{...r,_expand:u.searchParams.get("$expand"),_select:u.searchParams.get("$select")}:r)}));

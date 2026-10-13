@@ -19,6 +19,14 @@ http.createServer((req,res)=>{
   if (p.startsWith("/redir")) { res.writeHead(301,{location: encodeURI(BASE + "/") + u.search}); return res.end(); }
   if (p.startsWith("/УТ11/ru_RU")) return send(res,200,"<html><body>Веб-клиент 1С</body></html>","text/html");
   if (p.startsWith("/gw502")) return send(res,502,"<html>Bad Gateway</html>","text/html");
+  const BASE2 = "/ERP/odata/standard.odata";
+  if (p.startsWith(BASE2)) {
+    if (req.headers.authorization !== "Basic " + Buffer.from("erp.user:erp pass","utf8").toString("base64")) return send(res,401,"unauthorized","text/plain");
+    const q = p.slice(BASE2.length).replace(/^\//,"");
+    if (q === "") return send(res,200,JSON.stringify({value:[{name:"Catalog_Склады_ERP",url:"Catalog_Склады_ERP"},{name:"Document_ЗаказПокупателя_ERP",url:"Document_ЗаказПокупателя_ERP"}]}));
+    if (q === "Catalog_Склады_ERP/$count") return send(res,200,"77","text/plain");
+    return send(res,404,JSON.stringify({"odata.error":{message:{value:`Не найден объект ${q}`}}}));
+  }
   if (!p.startsWith(BASE)) return send(res,404,"<html>not found</html>","text/html");
   if (req.headers.authorization!==AUTH) return send(res,401,"unauthorized","text/plain");
   p = p.slice(BASE.length).replace(/^\//,"");

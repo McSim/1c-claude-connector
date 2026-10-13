@@ -17,7 +17,7 @@ import crypto from "node:crypto";
 import ssh2 from "ssh2";
 const { Client: SshClient } = ssh2;
 
-const VERSION = "1.4.0";
+const VERSION = "1.4.1";
 
 // ---------- настройки из формы Claude ----------
 // Пустое необязательное поле Claude может передать как "" или как "${user_config.x}"
@@ -91,7 +91,8 @@ if (SSH && !SSH_USER && SSH.user) SSH_USER = SSH.user;
 SSH_USER = SSH_USER.replace(/@.*$/, ""); // «root@1.2.3.4» в поле логина
 const useSsh = () => !!(SSH && SSH.host);
 
-const MAX_ROWS = 500;
+const MAX_ROWS = 5000; // за один вызов query; 1С читаем порциями по PAGE_ROWS
+const PAGE_ROWS = 1000;
 const DEFAULT_ROWS = 50;
 const TIMEOUT_MS = 45000;
 const MAX_TEXT = 150_000; // ограничение ответа, чтобы не забивать контекст
@@ -379,8 +380,8 @@ function tidy(v) {
   }
   return v;
 }
-function ok(data) {
-  let text = typeof data === "string" ? data : JSON.stringify(data, null, 1);
+function ok(data, compact = false) {
+  let text = typeof data === "string" ? data : JSON.stringify(data, null, compact ? 0 : 1);
   if (text.length > MAX_TEXT) text = text.slice(0, MAX_TEXT) + `\n\n…ответ обрезан (${Math.round(text.length / 1000)} КБ). Сузьте выборку: укажите select с нужными полями, filter или уменьшите top.`;
   return { content: [{ type: "text", text }] };
 }
@@ -414,7 +415,7 @@ const instructions = [
   "Остатки: AccumulationRegister_<Имя>/Balance(), обороты: /Turnovers(StartPeriod=datetime'2026-09-01T00:00:00',EndPeriod=datetime'2026-09-30T23:59:59'). Последние значения регистра сведений: InformationRegister_<Имя>/SliceLast().",
   "Фильтры OData: даты datetime'2026-09-01T00:00:00', GUID guid'...', строки в одинарных кавычках, substringof('текст', Description) eq true. Для документов обычно нужен Posted eq true, для справочников DeletionMark eq false.",
   "Названия вместо GUID получай в том же запросе: в select пиши ссылочное поле без _Key и через слэш нужный реквизит, например select=Number,Date,СуммаДокумента,Контрагент/Description (для остатков: Номенклатура/Description,Склад/Description,ВНаличииBalance). expand подставится сам. Если указать expand без select, придут все поля со всеми связями: это тяжело, так не делай. Для остатков и оборотов регистров сразу бери названия этим способом, не показывай пользователю GUID.",
-  "Большие выборки дроби через top/skip, считай через count. Не выдумывай имена объектов и полей: проверяй через list_objects и describe_object.",
+  "Большие выборки читай порциями: top до 5000 за вызов (коннектор сам читает 1С страницами), дальше skip. Итоги по большим данным получай не выгрузкой тысяч строк, а через count и виртуальные таблицы (Turnovers, Balance), это быстрее и точнее. Не выдумывай имена объектов и полей: проверяй через list_objects и describe_object.",
   "Как отвечать: пользователь, скорее всего, не технический специалист. Говори на его языке, показывай итог и аккуратную таблицу, а не сырой JSON. Не выводи имена объектов, GUID и синтаксис OData, если об этом не просили. Суммы пиши с разделителями тысяч, валюту не придумывай: если не уверен, не указывай. Если данных много, сначала дай итог и самое важное, потом предложи углубиться.",
   "Коннектор только читает. Если просят что-то изменить, создать или удалить в 1С, объясни, что через этот коннектор это невозможно, и предложи подготовить данные или текст, который пользователь внесёт сам.",
   "Если запрос вернул ошибку подключения, вызови check_connection и объясни пользователю простыми словами, что исправить: перескажи подсказку из ответа, не копируй технические детали. Никогда не проси пароли в чате: их вводят только в настройках расширения.",
@@ -561,7 +562,7 @@ server.registerTool(
       filter: z.string().optional().describe("Условие OData, например: Date ge datetime'2026-09-01T00:00:00' and Posted eq true"),
       select: z.string().optional().describe("Поля через запятую, например Number,Date,СуммаДокумента. Название ссылочного поля: Контрагент/Description, Номенклатура/Description, Склад/Description (expand добавится сам)"),
       orderby: z.string().optional().describe("Сортировка, например: Date desc"),
-      top: z.number().int().min(1).max(MAX_ROWS).optional().describe(`Сколько строк вернуть (по умолчанию ${DEFAULT_ROWS}, максимум ${MAX_ROWS})`),
+      top: z.number().int().min(1).max(MAX_ROWS).optional().describe(`Сколько строк вернуть (по умолчанию ${DEFAULT_ROWS}, максимум ${MAX_ROWS}). Длинные выборки коннектор читает из 1С порциями сам. Ответ ограничен примерно 150 КБ, поэтому для больших выборок указывай только нужные поля в select.`),
       skip: z.number().int().min(0).optional().describe("Сколько строк пропустить (постраничное чтение)"),
       expand: z.string().optional().describe("Обычно не нужен: expand подставляется из select, если там есть пути вида Контрагент/Description. Указывай только для сложных случаев."),
     },
@@ -572,14 +573,24 @@ server.registerTool(
     try {
       b = pickBase(base);
       const limit = top ?? DEFAULT_ROWS;
-      const data = await odataGet(b, safePath(object), {
-        $filter: filter, $select: select?.replace(/\s+/g, ""), $orderby: orderby, $top: limit, $skip: skip, $expand: autoExpand(select?.replace(/\s+/g, ""), expand?.replace(/\s+/g, "")),
-      });
-      const rows = Array.isArray(data?.value) ? tidy(data.value) : tidy(data);
-      if (!Array.isArray(rows)) return ok(rows);
+      const selectClean = select?.replace(/\s+/g, "");
+      const expandAuto = autoExpand(selectClean, expand?.replace(/\s+/g, ""));
+      const rows = [];
+      let offset = skip || 0;
+      while (rows.length < limit) {
+        const want = Math.min(PAGE_ROWS, limit - rows.length);
+        const data = await odataGet(b, safePath(object), {
+          $filter: filter, $select: selectClean, $orderby: orderby, $top: want, $skip: offset > 0 ? offset : undefined, $expand: expandAuto,
+        });
+        if (!Array.isArray(data?.value)) return ok(tidy(data), true);
+        const part = tidy(data.value);
+        rows.push(...part);
+        offset += part.length;
+        if (part.length < want) break;
+      }
       const res = { rows: rows.length, data: rows };
       if (rows.length === limit) res.note = `Возвращено ровно ${limit} строк: вероятно, есть ещё. Используй skip=${(skip || 0) + limit} для следующей страницы или count для общего числа.`;
-      return ok(res);
+      return ok(res, true);
     } catch (e) { return fail(e, b); }
   }
 );

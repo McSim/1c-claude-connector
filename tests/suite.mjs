@@ -67,10 +67,10 @@ await withClient({}, async c => { const r = await call(c,"check_connection"); ch
 
 // 5. SSH
 await withClient({}, async c => {
-  let r = await call(c,"query",{object:"Document_РеализацияТоваровУслуг",select:"Number, Контрагент/Description",top:2}); check("expand подставляется из select", r.text.includes('"_expand": "Контрагент"'), r.text);
-  r = await call(c,"query",{object:"Document_РеализацияТоваровУслуг",select:"Number,Контрагент/Description,Склад/Description",expand:"Контрагент",top:2}); check("expand: дополняется, без дублей", r.text.includes('"_expand": "Контрагент,Склад"'), r.text);
+  let r = await call(c,"query",{object:"Document_РеализацияТоваровУслуг",select:"Number, Контрагент/Description",top:2}); check("expand подставляется из select", r.text.includes('"_expand":"Контрагент"'), r.text);
+  r = await call(c,"query",{object:"Document_РеализацияТоваровУслуг",select:"Number,Контрагент/Description,Склад/Description",expand:"Контрагент",top:2}); check("expand: дополняется, без дублей", r.text.includes('"_expand":"Контрагент,Склад"'), r.text);
   r = await call(c,"query",{object:"Document_РеализацияТоваровУслуг",select:"Number,Дата",top:2}); check("expand не добавляется без путей в select", !r.text.includes("_expand"), r.text);
-  r = await call(c,"query",{object:"Document_РеализацияТоваровУслуг",select:"Number,Основание/Контрагент/Description",top:2}); check("expand: вложенный путь", r.text.includes('"_expand": "Основание/Контрагент"'), r.text);
+  r = await call(c,"query",{object:"Document_РеализацияТоваровУслуг",select:"Number,Основание/Контрагент/Description",top:2}); check("expand: вложенный путь", r.text.includes('"_expand":"Основание/Контрагент"'), r.text);
   const init = c.getInstructions?.() || ""; check("инструкции: названия вместо GUID", init.includes("Контрагент/Description"), init.slice(0,100));
 });
 await withClient({}, async c => {
@@ -100,6 +100,16 @@ await withClient({...TWO, ODATA_PASSWORD_2:"wrong"}, async c => {
 await withClient({}, async c => { const r = await call(c,"count",{object:"Document_РеализацияТоваровУслуг", base:"что-то"}); check("1 база: параметр base игнорируется", r.text.includes("1234"), r.text); });
 await withClient({ODATA_URL_3:"http://127.0.0.1:8766/ERP/odata/standard.odata/", ODATA_USERNAME_3:"erp.user", ODATA_PASSWORD_3:"erp pass"}, async c => {
   const r = await call(c,"check_connection"); check("3-я база без названия получает имя «База 3»", r.text.includes("База «База 3»") && r.text.includes("подключено баз: 2 из 2"), r.text);
+});
+await withClient({}, async c => {
+  let r = await call(c,"query",{object:"Catalog_Много",select:"Description",top:2000}); let j = JSON.parse(r.text);
+  check("top 2000: читается порциями и без пропусков", j.rows === 2000 && j.data[0].Description === "Товар 0" && j.data[1999].Description === "Товар 1999" && j.note?.includes("skip=2000"), r.text.slice(0,200));
+  r = await call(c,"query",{object:"Catalog_Много",top:5000}); j = JSON.parse(r.text);
+  check("top 5000 при 2300 записях: вернулось всё, без «есть ещё»", j.rows === 2300 && !j.note && j.data[2299].Description === "Товар 2299", r.text.slice(0,200));
+  r = await call(c,"query",{object:"Catalog_Много",top:1500,skip:2000}); j = JSON.parse(r.text);
+  check("skip + top: конец списка", j.rows === 300 && j.data[0].Description === "Товар 2000", r.text.slice(0,200));
+  r = await call(c,"query",{object:"Catalog_Много",top:10}); check("ответ компактный (без отступов)", !r.text.includes("\n "), r.text.slice(0,120));
+  const init = c.getInstructions?.() || ""; check("инструкции: top до 5000 и итоги через Turnovers", init.includes("5000") && init.includes("Turnovers"), init.slice(0,80));
 });
 await withClient(SSHOK, async c => { const r = await call(c,"check_connection"); check("SSH: всё верно", r.text.includes("SSH установлено") && r.text.includes("приняты"), r.text);
   const q = await call(c,"count",{object:"Document_РеализацияТоваровУслуг"}); check("SSH: запрос данных через туннель", q.text.includes("1234"), q.text); });

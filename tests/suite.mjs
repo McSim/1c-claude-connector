@@ -80,6 +80,27 @@ await withClient({DB_DESCRIPTION:"УТ 11"}, async c => {
   const r = await call(c,"check_connection"); check("check_connection: без совета, если база описана", r.text.includes("Можно спрашивать") && !r.text.includes("Совет:"), r.text);
   const init = c.getInstructions?.() || ""; check("инструкции: как отвечать и запрет записи", init.includes("Как отвечать") && init.includes("Коннектор только читает") && init.includes("Никогда не проси пароли"), init.slice(0,80));
 });
+const TWO = { BASE_NAME:"Бухгалтерия", BASE_NAME_2:"ERP", ODATA_URL_2:"http://127.0.0.1:8766/ERP/odata/standard.odata/", ODATA_USERNAME_2:"erp.user", ODATA_PASSWORD_2:"erp pass" };
+await withClient(TWO, async c => {
+  let r = await call(c,"check_connection");
+  check("2 базы: проверка показывает обе", r.text.includes("База «Бухгалтерия»") && r.text.includes("База «ERP»") && (r.text.match(/логин и пароль приняты/g)||[]).length === 2 && r.text.includes("подключено баз: 2 из 2"), r.text);
+  r = await call(c,"count",{object:"Catalog_Склады_ERP", base:"ERP"}); check("2 базы: запрос ко второй по названию", r.text.includes("77"), r.text);
+  r = await call(c,"count",{object:"Document_РеализацияТоваровУслуг", base:"бухгалтерия"}); check("2 базы: первая, название без учёта регистра", r.text.includes("1234"), r.text);
+  r = await call(c,"count",{object:"Catalog_Склады_ERP", base:"2"}); check("2 базы: выбор по номеру", r.text.includes("77"), r.text);
+  r = await call(c,"count",{object:"Catalog_Склады_ERP"}); check("2 базы: без base просит указать", r.err && r.text.includes("Подключено несколько баз") && r.text.includes("«ERP»"), r.text);
+  r = await call(c,"count",{object:"Catalog_Склады_ERP", base:"Зарплата"}); check("2 базы: неизвестная база → список доступных", r.err && r.text.includes("не найдена") && r.text.includes("«Бухгалтерия»"), r.text);
+  r = await call(c,"list_objects",{base:"ERP"}); check("2 базы: list_objects у второй", r.text.includes("Catalog_Склады_ERP") && !r.text.includes("Номенклатура"), r.text.slice(0,200));
+  r = await call(c,"count",{object:"Catalog_НетТакого", base:"ERP"}); check("2 базы: ошибка с названием базы", r.err && r.text.startsWith("База «ERP»"), r.text);
+  const init = c.getInstructions?.() || ""; check("2 базы: инструкции про параметр base", init.includes("Подключено несколько баз") && init.includes("base"), init.slice(0,120));
+});
+await withClient({...TWO, ODATA_PASSWORD_2:"wrong"}, async c => {
+  const r = await call(c,"check_connection");
+  check("2 базы: у второй неверный пароль, первая работает", r.text.includes("401") && r.text.includes("подключено баз: 1 из 2") && r.text.includes("приняты"), r.text);
+});
+await withClient({}, async c => { const r = await call(c,"count",{object:"Document_РеализацияТоваровУслуг", base:"что-то"}); check("1 база: параметр base игнорируется", r.text.includes("1234"), r.text); });
+await withClient({ODATA_URL_3:"http://127.0.0.1:8766/ERP/odata/standard.odata/", ODATA_USERNAME_3:"erp.user", ODATA_PASSWORD_3:"erp pass"}, async c => {
+  const r = await call(c,"check_connection"); check("3-я база без названия получает имя «База 3»", r.text.includes("База «База 3»") && r.text.includes("подключено баз: 2 из 2"), r.text);
+});
 await withClient(SSHOK, async c => { const r = await call(c,"check_connection"); check("SSH: всё верно", r.text.includes("SSH установлено") && r.text.includes("приняты"), r.text);
   const q = await call(c,"count",{object:"Document_РеализацияТоваровУслуг"}); check("SSH: запрос данных через туннель", q.text.includes("1234"), q.text); });
 for (const [label, host] of [["https://", "https://127.0.0.1:2224"],["ssh://user@", "ssh://deploy@127.0.0.1:2224/"],["команда ssh -p", "ssh deploy@127.0.0.1 -p 2224"],["пробелы", " 127.0.0.1:2224 "]])

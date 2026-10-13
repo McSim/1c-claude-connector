@@ -17,7 +17,7 @@ import crypto from "node:crypto";
 import ssh2 from "ssh2";
 const { Client: SshClient } = ssh2;
 
-const VERSION = "1.3.2";
+const VERSION = "1.4.0";
 
 // ---------- настройки из формы Claude ----------
 // Пустое необязательное поле Claude может передать как "" или как "${user_config.x}"
@@ -30,10 +30,38 @@ function cfg(name) {
 }
 const clean = (s) => String(s || "").replace(/[​-‍﻿ ]/g, " ").trim();
 
-const RAW_URL = clean(cfg("ODATA_URL"));
-const USERNAME = clean(cfg("ODATA_USERNAME"));
-const PASSWORD = cfg("ODATA_PASSWORD").replace(/^[\s ﻿]+|[\s ﻿]+$/g, "");
-const DB_DESCRIPTION = clean(cfg("DB_DESCRIPTION"));
+// До трёх баз 1С в одном расширении. Сервер-посредник (SSH) общий.
+const trimPw = (v) => v.replace(/^[\s ﻿]+|[\s ﻿]+$/g, "");
+function readBase(i) {
+  const sfx = i === 1 ? "" : `_${i}`;
+  const rawUrl = clean(cfg(`ODATA_URL${sfx}`));
+  if (!rawUrl) return null;
+  return {
+    id: i,
+    rawUrl,
+    username: clean(cfg(`ODATA_USERNAME${sfx}`)),
+    password: trimPw(cfg(`ODATA_PASSWORD${sfx}`)),
+    name: clean(cfg(`BASE_NAME${sfx}`)) || `База ${i}`,
+    description: i === 1 ? clean(cfg("DB_DESCRIPTION")) : "",
+    metaCache: null,
+    listCache: null,
+  };
+}
+const BASES = [1, 2, 3].map(readBase).filter(Boolean);
+const NO_URL_MSG = "Не указан адрес OData. Откройте настройки расширения и впишите адрес, который прислал тех. специалист.";
+function pickBase(arg) {
+  if (!BASES.length) throw new Error(NO_URL_MSG);
+  if (BASES.length === 1) return BASES[0];
+  const names = BASES.map((b) => `«${b.name}»`).join(", ");
+  const a = clean(arg);
+  if (!a) throw new Error(`Подключено несколько баз 1С: ${names}. Укажите параметр base: название нужной базы.`);
+  const q = a.replace(/[«»"]/g, "").toLowerCase();
+  const exact = BASES.find((b) => b.name.toLowerCase() === q || String(b.id) === q);
+  if (exact) return exact;
+  const part = BASES.filter((b) => b.name.toLowerCase().includes(q) || q.includes(b.name.toLowerCase()));
+  if (part.length === 1) return part[0];
+  throw new Error(`База «${a}» не найдена. Доступные базы: ${names}.`);
+}
 const ALLOW_SELF_SIGNED = /^(true|1|yes)$/i.test(clean(cfg("ALLOW_SELF_SIGNED")));
 
 // SSH: принимаем «грязный» ввод: https://1.2.3.4/, ssh://user@1.2.3.4:22, «ssh root@1.2.3.4 -p 2222»
@@ -71,9 +99,9 @@ const MAX_TEXT = 150_000; // ограничение ответа, чтобы н�
 const log = (...a) => { try { process.stderr.write(`[1c-connector ${VERSION}] ${a.join(" ")}\n`); } catch {} };
 
 // ---------- адрес OData ----------
-function baseUrl() {
-  if (!RAW_URL) throw new Error("Не указан адрес OData. Откройте настройки расширения и впишите адрес, который прислал тех. специалист.");
-  let u = RAW_URL.replace(/\\/g, "/").replace(/\s+/g, "");
+function baseUrl(base) {
+  if (!base?.rawUrl) throw new Error(NO_URL_MSG);
+  let u = base.rawUrl.replace(/\\/g, "/").replace(/\s+/g, "");
   if (!/^https?:\/\//i.test(u)) u = "http://" + u.replace(/^[a-z]+:\/\//i, "");
   u = u.replace(/[?#].*$/, "");
   u = u.replace(/^(https?:\/\/)(.*)$/i, (_, p, rest) => p + rest.replace(/\/{2,}/g, "/"));
@@ -83,9 +111,9 @@ function baseUrl() {
   return new URL(u + "/").toString(); // кириллица в имени базы кодируется здесь
 }
 
-function authHeader() {
-  if (!USERNAME) return {};
-  return { Authorization: "Basic " + Buffer.from(`${USERNAME}:${PASSWORD}`, "utf8").toString("base64") };
+function authHeader(base) {
+  if (!base.username) return {};
+  return { Authorization: "Basic " + Buffer.from(`${base.username}:${base.password}`, "utf8").toString("base64") };
 }
 
 // Путь допускает имя объекта 1С и виртуальные таблицы: /Balance(), /Turnovers(Period=datetime'...'), /SliceLast()
@@ -291,16 +319,16 @@ function oneCError(text) {
   return text.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim().slice(0, 400);
 }
 
-async function odataGet(p, params = {}, { json = true } = {}) {
+async function odataGet(base, p, params = {}, { json = true } = {}) {
   // Ключи вида $filter передаём без кодирования: часть версий 1С не понимает %24filter
   const parts = [];
   if (json) parts.push("$format=json");
   for (const [k, v] of Object.entries(params)) if (v !== undefined && v !== null && v !== "") parts.push(`${k}=${encodeURIComponent(String(v))}`);
-  const url = baseUrl() + p + (parts.length ? "?" + parts.join("&") : "");
+  const url = baseUrl(base) + p + (parts.length ? "?" + parts.join("&") : "");
   let res;
   const t0 = Date.now();
   try {
-    res = await httpGet(url, { Accept: json ? "application/json" : "*/*", ...authHeader() });
+    res = await httpGet(url, { Accept: json ? "application/json" : "*/*", ...authHeader(base) });
   } catch (e) {
     log("net error", e.code || "", e.message);
     throw netError(e, url);
@@ -356,24 +384,31 @@ function ok(data) {
   if (text.length > MAX_TEXT) text = text.slice(0, MAX_TEXT) + `\n\n…ответ обрезан (${Math.round(text.length / 1000)} КБ). Сузьте выборку: укажите select с нужными полями, filter или уменьшите top.`;
   return { content: [{ type: "text", text }] };
 }
-const fail = (e) => ({ isError: true, content: [{ type: "text", text: String(e?.message || e) }] });
+const fail = (e, b) => ({ isError: true, content: [{ type: "text", text: (b && BASES.length > 1 ? `База «${b.name}»: ` : "") + String(e?.message || e) }] });
+const baseParam = z.string().optional().describe("Название базы 1С. Нужно только если подключено несколько баз, при одной базе не указывай.");
 
 // метаданные в УТ/ERP бывают десятки мегабайт: качаем один раз
-let metaCache = null;
-async function getMetadata() {
-  if (!metaCache) metaCache = odataGet("$metadata", {}, { json: false }).catch((e) => { metaCache = null; throw e; });
-  return metaCache;
+async function getMetadata(b) {
+  if (!b.metaCache) b.metaCache = odataGet(b, "$metadata", {}, { json: false }).catch((e) => { b.metaCache = null; throw e; });
+  return b.metaCache;
 }
-let listCache = null;
-async function getObjectList() {
-  if (!listCache) listCache = odataGet("").then((d) => (d.value || []).map((x) => x.name || x.url).filter(Boolean)).catch((e) => { listCache = null; throw e; });
-  return listCache;
+async function getObjectList(b) {
+  if (!b.listCache) b.listCache = odataGet(b, "").then((d) => (d.value || []).map((x) => x.name || x.url).filter(Boolean)).catch((e) => { b.listCache = null; throw e; });
+  return b.listCache;
 }
 
 // ---------- сервер ----------
+function baseLine() {
+  if (BASES.length > 1) {
+    const names = BASES.map((b) => `«${b.name}»`).join(", ");
+    const descr = BASES.filter((b) => b.description).map((b) => ` Описание базы «${b.name}»: ${b.description}`).join("");
+    return `Подключено несколько баз 1С: ${names}. Во всех инструментах указывай параметр base с названием нужной базы. Если из вопроса неясно, о какой базе речь, уточни у пользователя. Базы независимы: имена объектов и поля у них могут отличаться, поэтому проверяй каждую через list_objects и describe_object. Чтобы сравнить данные, запрашивай базы по очереди.${descr}`;
+  }
+  return BASES[0]?.description ? `Описание базы от пользователя: ${BASES[0].description}` : "";
+}
 const instructions = [
   "Коннектор к 1С:Предприятие через стандартный интерфейс OData. Только чтение.",
-  DB_DESCRIPTION ? `Описание базы от пользователя: ${DB_DESCRIPTION}` : "",
+  baseLine(),
   "Как работать: 1) list_objects с фильтром по смыслу (например 'Номенклатура', 'Реализация', 'Остатки'), чтобы узнать точное имя; 2) describe_object, чтобы узнать поля; 3) query с select (только нужные поля), filter и top.",
   "Имена: справочники Catalog_…, документы Document_…, регистры накопления AccumulationRegister_…, сведений InformationRegister_…. Ссылочные поля оканчиваются на _Key (GUID).",
   "Остатки: AccumulationRegister_<Имя>/Balance(), обороты: /Turnovers(StartPeriod=datetime'2026-09-01T00:00:00',EndPeriod=datetime'2026-09-30T23:59:59'). Последние значения регистра сведений: InformationRegister_<Имя>/SliceLast().",
@@ -398,35 +433,53 @@ server.registerTool(
   async () => {
     const steps = [`ℹ️ 1С-коннектор ${VERSION}`];
     const line = (good, text) => steps.push(`${good ? "✅" : "❌"} ${text}`);
-    let url;
-    try { url = baseUrl(); line(true, `Адрес OData: ${decodeURI(url)}`); } catch (e) { line(false, e.message); return ok(steps.join("\n")); }
-    if (!USERNAME) steps.push("⚠️ Логин 1С не указан: подключение без авторизации.");
-    if (url.startsWith("http://") && !/^(127\.|10\.|192\.168\.|localhost)/.test(new URL(url).hostname)) steps.push("⚠️ Адрес начинается с http://: логин и пароль 1С идут через интернет без шифрования. Для постоянной работы попросите тех. специалиста настроить https.");
-    if (useSsh()) {
-      try {
-        await getSsh();
-        line(true, `Сервер-посредник ${SSH.host}:${SSH.port}, пользователь ${SSH_USER}: подключение по SSH установлено`);
-        if (sshAuth.allowed) steps.push(`ℹ️ Методы входа, которые разрешает сервер: ${methodList(sshAuth.allowed)}. Использован: ${METHOD_NAMES[sshAuth.used] || sshAuth.used}.`);
+    if (!BASES.length) { line(false, NO_URL_MSG); return ok(steps.join("\n")); }
+    const multi = BASES.length > 1;
+    let sshDone = false;
+    let good = 0;
+    for (const b of BASES) {
+      if (multi) steps.push(`\n▶ База «${b.name}»`);
+      let url;
+      try { url = baseUrl(b); line(true, `Адрес OData: ${decodeURI(url)}`); } catch (e) { line(false, e.message); continue; }
+      if (!b.username) steps.push("⚠️ Логин 1С не указан: подключение без авторизации.");
+      if (url.startsWith("http://") && !/^(127\.|10\.|192\.168\.|localhost)/.test(new URL(url).hostname)) steps.push("⚠️ Адрес начинается с http://: логин и пароль 1С идут через интернет без шифрования. Для постоянной работы попросите тех. специалиста настроить https.");
+      if (!sshDone) {
+        sshDone = true;
+        if (useSsh()) {
+          try {
+            await getSsh();
+            line(true, `Сервер-посредник ${SSH.host}:${SSH.port}, пользователь ${SSH_USER}: подключение по SSH установлено`);
+            if (sshAuth.allowed) steps.push(`ℹ️ Методы входа, которые разрешает сервер: ${methodList(sshAuth.allowed)}. Использован: ${METHOD_NAMES[sshAuth.used] || sshAuth.used}.`);
+          } catch (e) { line(false, e.message); return ok(steps.join("\n")); }
+        } else {
+          steps.push("ℹ️ Сервер-посредник не указан: подключение к 1С идёт напрямую с этого компьютера.");
+        }
       }
-      catch (e) { line(false, e.message); return ok(steps.join("\n")); }
-    } else {
-      steps.push("ℹ️ Сервер-посредник не указан: подключение к 1С идёт напрямую с этого компьютера.");
+      try {
+        b.listCache = null;
+        const names = await getObjectList(b);
+        line(true, "1С отвечает, логин и пароль приняты");
+        if (!names.length) { line(false, "В составе OData нет ни одного объекта. Попросите тех. специалиста настроить состав стандартного интерфейса OData."); continue; }
+        const groups = {};
+        for (const n of names) { const g = n.split("_")[0]; groups[g] = (groups[g] || 0) + 1; }
+        line(true, `Опубликовано объектов: ${names.length} (${Object.entries(groups).map(([g, c]) => `${g}: ${c}`).join(", ")})`);
+        good++;
+      } catch (e) { line(false, e.message); }
     }
-    try {
-      listCache = null;
-      const names = await getObjectList();
-      line(true, "1С отвечает, логин и пароль приняты");
-      if (!names.length) { line(false, "В составе OData нет ни одного объекта. Попросите тех. специалиста настроить состав стандартного интерфейса OData."); return ok(steps.join("\n")); }
-      const groups = {};
-      for (const n of names) { const g = n.split("_")[0]; groups[g] = (groups[g] || 0) + 1; }
-      line(true, `Опубликовано объектов: ${names.length} (${Object.entries(groups).map(([g, c]) => `${g}: ${c}`).join(", ")})`);
-      steps.push("\nГотово, 1С подключена. Можно спрашивать обычными словами, например:");
-      steps.push("• Покажи 5 последних реализаций с названием контрагента");
-      steps.push("• Какие остатки на складах, покажи названия товаров");
-      steps.push("• Сколько позиций в номенклатуре");
+    if (good) {
+      if (multi) {
+        steps.push(`\nГотово, подключено баз: ${good} из ${BASES.length}. Можно спрашивать обычными словами и называть базу, например:`);
+        steps.push(`• Покажи 5 последних реализаций из базы «${BASES[0].name}»`);
+        steps.push(`• Сравни остатки в «${BASES[0].name}» и «${BASES[1].name}»`);
+      } else {
+        steps.push("\nГотово, 1С подключена. Можно спрашивать обычными словами, например:");
+        steps.push("• Покажи 5 последних реализаций с названием контрагента");
+        steps.push("• Какие остатки на складах, покажи названия товаров");
+        steps.push("• Сколько позиций в номенклатуре");
+      }
       steps.push("(Названия объектов зависят от вашей конфигурации, Claude найдёт нужные сам.)");
-      if (!DB_DESCRIPTION) steps.push("\nСовет: в настройках расширения можно описать базу одной фразой, например «УТ 11, оптовая торговля». Так Claude будет точнее.");
-    } catch (e) { line(false, e.message); }
+      if (!multi && !BASES[0].description) steps.push("\nСовет: в настройках расширения можно описать базу одной фразой, например «УТ 11, оптовая торговля». Так Claude будет точнее.");
+    }
     return ok(steps.join("\n"));
   }
 );
@@ -437,13 +490,16 @@ server.registerTool(
     title: "Список объектов 1С",
     description: "Показывает, какие объекты 1С опубликованы через OData: справочники (Catalog_), документы (Document_), регистры (AccumulationRegister_, InformationRegister_, AccountingRegister_). Вызывай первым, чтобы узнать точные имена. В больших базах сразу передавай contains.",
     inputSchema: {
+      base: baseParam,
       contains: z.string().optional().describe("Часть имени, например 'Номенклатура', 'Реализация', 'Document_'. Несколько вариантов через запятую."),
     },
     annotations: { readOnlyHint: true },
   },
-  async ({ contains }) => {
+  async ({ contains, base }) => {
+    let b;
     try {
-      const names = await getObjectList();
+      b = pickBase(base);
+      const names = await getObjectList(b);
       if (!names.length) return ok("В составе OData нет ни одного объекта. Попросите тех. специалиста настроить состав стандартного интерфейса OData.");
       if (contains) {
         const terms = contains.split(",").map((t) => t.trim().toLowerCase()).filter(Boolean);
@@ -458,7 +514,7 @@ server.registerTool(
         note: "Объектов много, показаны только группы и первые имена. Вызови list_objects с contains, чтобы найти нужный объект.",
         groups: Object.fromEntries(Object.entries(groups).map(([g, arr]) => [g, { count: arr.length, examples: arr.slice(0, 15) }])),
       });
-    } catch (e) { return fail(e); }
+    } catch (e) { return fail(e, b); }
   }
 );
 
@@ -467,12 +523,14 @@ server.registerTool(
   {
     title: "Поля объекта 1С",
     description: "Показывает поля (реквизиты) объекта 1С и их типы, включая табличные части, чтобы правильно строить select, filter и expand.",
-    inputSchema: { object: z.string().describe("Имя объекта, например Catalog_Номенклатура или Document_РеализацияТоваровУслуг") },
+    inputSchema: { base: baseParam, object: z.string().describe("Имя объекта, например Catalog_Номенклатура или Document_РеализацияТоваровУслуг") },
     annotations: { readOnlyHint: true },
   },
-  async ({ object }) => {
+  async ({ object, base }) => {
+    let b;
     try {
-      const xml = await getMetadata();
+      b = pickBase(base);
+      const xml = await getMetadata(b);
       const name = String(object).trim().replace(/^.*\/odata\/standard\.odata\//i, "").split("/")[0].replace(/\(.*$/, "");
       const esc = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
       const pick = (tag, n) => xml.match(new RegExp(`<${tag}[^>]*\\sName="${n}"[^>]*>([\\s\\S]*?)</${tag}>`));
@@ -488,7 +546,7 @@ server.registerTool(
       });
       const links = [...body.matchAll(/<NavigationProperty\s+[^>]*Name="([^"]+)"/g)].map((x) => x[1]);
       return ok({ object: name, fields, expand_links: links });
-    } catch (e) { return fail(e); }
+    } catch (e) { return fail(e, b); }
   }
 );
 
@@ -498,6 +556,7 @@ server.registerTool(
     title: "Выборка данных из 1С",
     description: "Читает записи объекта 1С. Поддерживает filter, select, orderby, top, skip, expand. Для остатков и оборотов регистров накопления используй виртуальные таблицы, например AccumulationRegister_ТоварыНаСкладах/Balance(). Всегда указывай select с нужными полями: документы 1С очень объёмные. Только чтение.",
     inputSchema: {
+      base: baseParam,
       object: z.string().describe("Имя объекта или виртуальной таблицы, например Document_РеализацияТоваровУслуг или AccumulationRegister_ТоварыНаСкладах/Balance()"),
       filter: z.string().optional().describe("Условие OData, например: Date ge datetime'2026-09-01T00:00:00' and Posted eq true"),
       select: z.string().optional().describe("Поля через запятую, например Number,Date,СуммаДокумента. Название ссылочного поля: Контрагент/Description, Номенклатура/Description, Склад/Description (expand добавится сам)"),
@@ -508,10 +567,12 @@ server.registerTool(
     },
     annotations: { readOnlyHint: true },
   },
-  async ({ object, filter, select, orderby, top, skip, expand }) => {
+  async ({ base, object, filter, select, orderby, top, skip, expand }) => {
+    let b;
     try {
+      b = pickBase(base);
       const limit = top ?? DEFAULT_ROWS;
-      const data = await odataGet(safePath(object), {
+      const data = await odataGet(b, safePath(object), {
         $filter: filter, $select: select?.replace(/\s+/g, ""), $orderby: orderby, $top: limit, $skip: skip, $expand: autoExpand(select?.replace(/\s+/g, ""), expand?.replace(/\s+/g, "")),
       });
       const rows = Array.isArray(data?.value) ? tidy(data.value) : tidy(data);
@@ -519,7 +580,7 @@ server.registerTool(
       const res = { rows: rows.length, data: rows };
       if (rows.length === limit) res.note = `Возвращено ровно ${limit} строк: вероятно, есть ещё. Используй skip=${(skip || 0) + limit} для следующей страницы или count для общего числа.`;
       return ok(res);
-    } catch (e) { return fail(e); }
+    } catch (e) { return fail(e, b); }
   }
 );
 
@@ -529,22 +590,25 @@ server.registerTool(
     title: "Количество записей в 1С",
     description: "Считает количество записей объекта 1С, при необходимости с фильтром OData.",
     inputSchema: {
+      base: baseParam,
       object: z.string().describe("Имя объекта, например Catalog_Контрагенты"),
       filter: z.string().optional().describe("Условие OData"),
     },
     annotations: { readOnlyHint: true },
   },
-  async ({ object, filter }) => {
+  async ({ base, object, filter }) => {
+    let b;
     try {
-      const n = await odataGet(safePath(object) + "/$count", { $filter: filter }, { json: false });
+      b = pickBase(base);
+      const n = await odataGet(b, safePath(object) + "/$count", { $filter: filter }, { json: false });
       const num = Number(String(n).trim());
       if (Number.isNaN(num)) throw new Error("1С не вернула количество для этого объекта. Для виртуальных таблиц используйте query.");
       return ok({ object, count: num });
-    } catch (e) { return fail(e); }
+    } catch (e) { return fail(e, b); }
   }
 );
 
 process.on("uncaughtException", (e) => log("uncaught", e?.stack || e));
 process.on("unhandledRejection", (e) => log("unhandled", e?.stack || e));
-log("start", useSsh() ? `via ssh ${SSH.host}:${SSH.port}` : "direct");
+log("start", useSsh() ? `via ssh ${SSH.host}:${SSH.port}` : "direct", `bases: ${BASES.length}`);
 await server.connect(new StdioServerTransport());
